@@ -2,17 +2,17 @@ pipeline {
     agent any
 
     environment {
-        SONAR_TOKEN = credentials('sonar-token')
-        NEXUS_CRED  = credentials('NEXUS-CRED')
-        DOCKER_HUB  = credentials('dockerhub')
+        SONAR_TOKEN = credentials('sonar')
+        NEXUS_CRED  = credentials('nexus')
+        DOCKER_HUB  = credentials('docker-hub')
     }
 
     stages {
 
         stage('Checkout') {
             steps {
-                git branch: 'main',
-                    url: ''
+                git branch: 'master',
+                    url: 'https://github.com/RakeshKasagani/newmew-javascript.git'
             }
         }
 
@@ -38,14 +38,14 @@ pipeline {
                         /opt/sonar-scanner/bin/sonar-scanner \
                           -Dsonar.projectKey=nodeapp \
                           -Dsonar.sources=. \
-                          -Dsonar.host.url=http://3.89.29.36:9000 \
+                          -Dsonar.host.url=http://51.20.37.198:9000/
                           -Dsonar.login=$SONAR_TOKEN
                     '''
                 }
             }
         }
 
-        stage('Upload to Nexus') {
+        stage('Upload to nexus') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'NEXUS-CRED',
@@ -56,12 +56,12 @@ pipeline {
                     sh '''
                         echo "Creating TAR..."
                         tar --ignore-failed-read --warning=no-file-changed \
-                            -czf nodeapp.tar.gz *
+                            -czf newmew.tar.gz *
 
-                        echo "Uploading TAR to Nexus..."
+                        echo "Uploading TAR to nexus..."
                         curl -v -u $NEXUS_USER:$NEXUS_PASS \
-                            --upload-file nodeapp.tar.gz \
-                            http://3.89.29.36:8081/repository/nodejs/nodeapp.tar.gz
+                            --upload-file newmew.tar.gz \
+                            http://51.20.37.198:8081/repository/nodejs/newmew.tar.gz
                     '''
                 }
             }
@@ -71,7 +71,7 @@ pipeline {
             steps {
                 sh '''
                     echo "Building Docker image..."
-                    docker build -t kishangollamudi/nodeapp:latest .
+                    docker build -t rakesh268/newmew:latest .
                 '''
             }
         }
@@ -79,14 +79,14 @@ pipeline {
         stage('Push Docker Image') {
             steps {
                 withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub',
+                    credentialsId: 'docker-hub',
                     usernameVariable: 'DOCKER_USER',
                     passwordVariable: 'DOCKER_PASS'
                 )]) {
 
                     sh '''
                         echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-                        docker push kishangollamudi/nodeapp:latest
+                        docker push rakesh268/newmew:latest
                     '''
                 }
             }
