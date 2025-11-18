@@ -1,5 +1,4 @@
 pipeline {
-    agent { docker { image 'node:18' } }
 
     environment {
         SONAR_TOKEN = credentials('sonar')
@@ -48,7 +47,7 @@ pipeline {
             steps {
                 sh '''
                     curl -v -u $NEXUS_CRED_USR:$NEXUS_CRED_PSW \
-                        --upload-file nodeapp.zip \
+                        --upload-file nemew.zip \
                         http://13.51.204.28:8081/repository/nodejs/newmew.zip
                 '''
             }
