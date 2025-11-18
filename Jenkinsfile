@@ -11,7 +11,7 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                git branch: 'main', url: 'https://github.com/RakeshKasagani/newmew-javascript.git'
+                git branch: 'master', url: 'https://github.com/RakeshKasagani/newmew-javascript.git'
             }
         }
 
