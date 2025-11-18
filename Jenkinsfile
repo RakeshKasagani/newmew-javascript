@@ -11,7 +11,7 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                git branch: 'main', url: 'https://github.com/KishanGollamudi/nodejs-getting-started.git'
+                git branch: 'main', url: 'https://github.com/RakeshKasagani/newmew-javascript.git'
             }
         }
 
