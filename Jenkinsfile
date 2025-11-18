@@ -10,11 +10,6 @@ pipeline {
     SONAR_HOST = "http://51.20.37.198:9000"
   }
 
-  // Make sure you've configured a NodeJS installation named "NodeJS_18"
-  tools {
-    nodejs 'NodeJS_18'
-  }
-
   stages {
     stage('Checkout') {
       steps {
@@ -28,53 +23,88 @@ pipeline {
           echo "USER: $(whoami) HOST: $(hostname)"
           echo "Workspace: $WORKSPACE"
           echo "PATH=$PATH"
-          echo "Which node/npm/docker:"
+          echo "which node:"
           which node || true
           node -v || true
           npm -v || true
+          echo "which docker:"
           which docker || echo "docker not found"
         '''
       }
     }
 
-    stage('Install & Build') {
+    stage('Install & Build (auto-detect)') {
       steps {
-        sh '''
-          echo "Node:"
-          node -v
-          npm -v
+        script {
+          // prefer system node if available
+          def nodeOnPath = sh(script: 'which node >/dev/null 2>&1 && echo yes || echo no', returnStdout: true).trim() == 'yes'
+          def dockerOnPath = sh(script: 'which docker >/dev/null 2>&1 && echo yes || echo no', returnStdout: true).trim() == 'yes'
 
-          echo "Installing dependencies (npm ci)..."
-          npm ci --no-audit --no-fund
-
-          if npm run | grep -q " build"; then
-            echo "Running npm run build..."
-            npm run build || echo "build failed but continuing"
-          else
-            echo "No build script found in package.json"
-          fi
-
-          echo "Build workspace:"
-          ls -la
-        '''
+          if (nodeOnPath) {
+            echo "Using node from PATH on agent"
+            sh '''
+              node -v
+              npm -v
+              npm ci --no-audit --no-fund
+              if npm run | grep -q " build"; then
+                npm run build || echo "build failed but continuing"
+              else
+                echo "No build script found"
+              fi
+              ls -la
+            '''
+          } else if (dockerOnPath) {
+            echo "System node not found; attempting to run build inside node:18-alpine Docker image"
+            // use docker to run node commands with workspace mounted
+            sh """
+              docker run --rm -v "$WORKSPACE":"$WORKSPACE" -w "$WORKSPACE" node:18-alpine /bin/sh -c \\
+                "apk add --no-cache python3 make g++ >/dev/null 2>&1 || true; \\
+                 node -v; npm -v || true; \\
+                 npm ci --no-audit --no-fund || { echo 'npm ci failed'; exit 2; }; \\
+                 if npm run | grep -q ' build'; then npm run build || echo 'build failed but continuing'; fi; \\
+                 ls -la"
+            """
+          } else {
+            error """No node/npm available on agent PATH and docker is not usable.
+To fix:
+  - install Node (system-wide) on the agent OR
+  - configure the Jenkins NodeJS plugin (Manage Jenkins → Global Tool Configuration) with a Node installation, or
+  - enable Docker for the Jenkins user so the pipeline can use the node Docker image.
+"""
+          }
+        }
       }
     }
 
     stage('SonarQube Analysis') {
       steps {
-        withSonarQubeEnv('My-Sonar') {
-          sh '''
-            # Prefer sonar-scanner on agent; if not present, show message and continue
-            if command -v sonar-scanner >/dev/null 2>&1; then
+        script {
+          def sonarInstalled = sh(script: 'command -v sonar-scanner >/dev/null 2>&1 && echo yes || echo no', returnStdout: true).trim() == 'yes'
+          def dockerOnPath = sh(script: 'which docker >/dev/null 2>&1 && echo yes || echo no', returnStdout: true).trim() == 'yes'
+
+          if (sonarInstalled) {
+            echo "Running sonar-scanner from agent"
+            sh """
               sonar-scanner \
                 -Dsonar.projectKey=nodeapp \
                 -Dsonar.sources=. \
                 -Dsonar.host.url=${SONAR_HOST} \
                 -Dsonar.login=${SONAR_TOKEN}
-            else
-              echo "sonar-scanner not installed on agent. Configure sonar-scanner as a global tool or install on agent to run full scan."
-            fi
-          '''
+            """
+          } else if (dockerOnPath) {
+            echo "sonar-scanner not installed; trying sonar-scanner docker image"
+            sh """
+              docker run --rm -v "$WORKSPACE":"$WORKSPACE" -w "$WORKSPACE" \\
+                -e SONAR_LOGIN=${SONAR_TOKEN} \\
+                sonarsource/sonar-scanner-cli:latest \\
+                -Dsonar.projectKey=nodeapp \\
+                -Dsonar.sources=. \\
+                -Dsonar.host.url=${SONAR_HOST} \\
+                -Dsonar.login=\$SONAR_LOGIN
+            """
+          } else {
+            echo "Skipping SonarQube analysis: no sonar-scanner installed and docker not usable."
+          }
         }
       }
     }
@@ -83,9 +113,8 @@ pipeline {
       steps {
         withCredentials([usernamePassword(credentialsId: 'nexus', usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASS')]) {
           sh '''
-            echo "Preparing artifact..."
+            echo "Creating TAR artifact..."
             tar --ignore-failed-read --warning=no-file-changed -czf newmew.tar.gz * || { echo "tar failed"; exit 1; }
-
             echo "Uploading to Nexus..."
             curl -v -u $NEXUS_USER:$NEXUS_PASS --upload-file newmew.tar.gz ${NEXUS_UPLOAD_URL} || { echo "Nexus upload failed"; exit 1; }
           '''
@@ -99,7 +128,7 @@ pipeline {
       }
       steps {
         sh '''
-          echo "Docker available: building image ${IMAGE_TAG}"
+          echo "Building Docker image ${IMAGE_TAG}"
           docker build -t ${IMAGE_TAG} .
           docker images | head -n 20
         '''
@@ -113,10 +142,7 @@ pipeline {
       steps {
         withCredentials([usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
           sh '''
-            echo "Logging into Docker registry..."
             echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-
-            echo "Pushing ${IMAGE_TAG} ..."
             docker push ${IMAGE_TAG} || { echo "docker push failed"; exit 1; }
           '''
         }
