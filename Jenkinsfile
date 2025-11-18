@@ -69,14 +69,20 @@ pipeline {
           if [ -f .nvmrc_for_jenkins ]; then . ./.nvmrc_for_jenkins; fi
 
           if [ -f package.json ]; then
-            echo "Original package.json:"
-            jq '.' package.json || cat package.json
+            echo "Original package.json (top):"
+            jq '.name, .version, .private' package.json || cat package.json | sed -n '1,40p'
 
-            # Remove "private" if present
-            node -e "let fs=require('fs'); let p=JSON.parse(fs.readFileSync('package.json')); if(p.private){ delete p.private; console.log('Removed private flag'); } if(p.version === '0.0.0' || !p.version){ p.version = '0.0.' + (process.env.BUILD_NUMBER || Date.now()); console.log('Bumped version to', p.version);} fs.writeFileSync('package.json', JSON.stringify(p,null,2));"
+            # Remove "private" if present and bump version if 0.0.0
+            node -e "
+              const fs=require('fs');
+              const p=JSON.parse(fs.readFileSync('package.json'));
+              if(p.private){ delete p.private; console.log('Removed private flag'); }
+              if(!p.version || p.version === '0.0.0'){ p.version = '0.0.' + (process.env.BUILD_NUMBER || Date.now()); console.log('Bumped version to', p.version); }
+              fs.writeFileSync('package.json', JSON.stringify(p,null,2));
+            "
 
-            echo "Updated package.json:"
-            jq '.' package.json || cat package.json
+            echo "Updated package.json (top):"
+            jq '.name, .version' package.json || cat package.json | sed -n '1,40p'
           else
             echo "No package.json found!"
             exit 1
@@ -137,29 +143,53 @@ EOF
       }
     }
 
-    stage('Verify Nexus & Debug') {
+    //////////////////////////////////////////////
+    // Fail-fast Nexus check (clear error)      //
+    // Inserted immediately before publish      //
+    //////////////////////////////////////////////
+    stage('Verify Nexus Repo (fail fast)') {
       steps {
-        // Lightweight check so we get clearer logs if the repo name is wrong or unreachable
         sh '''
           set -e
           if [ -f .nvmrc_for_jenkins ]; then . ./.nvmrc_for_jenkins; fi
 
           NEXUS_REGISTRY="${NEXUS_URL%/}/repository/${NEXUS_NPM_REPO}/"
           echo "Checking Nexus registry URL: ${NEXUS_REGISTRY}"
-          echo "curl -I output:"
+          STATUS=$(curl -o /dev/null -s -w "%{http_code}" --max-time 10 "${NEXUS_REGISTRY}" || echo "000")
+          if [ "$STATUS" = "404" ]; then
+            echo "ERROR: Nexus registry returned 404 - repository '${NEXUS_NPM_REPO}' may not exist or is not a hosted npm repo."
+            echo "Action: Confirm the repository name in Nexus (Repositories → look for format: npm, type: hosted)."
+            exit 2
+          fi
+          if [ "$STATUS" = "000" ]; then
+            echo "ERROR: Cannot reach Nexus at ${NEXUS_REGISTRY} (network/service down)."
+            exit 2
+          fi
+          echo "Nexus registry reachable (HTTP $STATUS). Continuing..."
+        '''
+      }
+    }
+
+    stage('Verify Nexus & Debug (optional details)') {
+      steps {
+        // Lightweight debug output (safe). This prints .npmignore and curl -I output for quick troubleshooting.
+        sh '''
+          set -e
+          if [ -f .nvmrc_for_jenkins ]; then . ./.nvmrc_for_jenkins; fi
+
+          NEXUS_REGISTRY="${NEXUS_URL%/}/repository/${NEXUS_NPM_REPO}/"
+          echo "curl -I ${NEXUS_REGISTRY} (for debugging):"
           curl -I --max-time 10 "${NEXUS_REGISTRY}" || true
 
-          echo "Showing the top of the generated .npmignore (for verification):"
+          echo "Top lines of .npmignore (verify):"
           sed -n '1,120p' .npmignore || true
-
-          echo "If the previous curl returned 404, confirm Nexus repo name and that it's a 'hosted' npm repo (not proxy/group)."
         '''
       }
     }
 
     stage('Publish to Nexus (npm)') {
       steps {
-        // Publish the npm tarball to Nexus npm repository using npm publish (correct method for npm repos)
+        // Publish the npm tarball to Nexus npm repository using npm publish
         sh '''
           set -e
           if [ -f .nvmrc_for_jenkins ]; then . ./.nvmrc_for_jenkins; fi
@@ -174,14 +204,6 @@ EOF
           # Build registry URL and host-only (used to create .npmrc)
           NEXUS_REGISTRY="${NEXUS_URL%/}/repository/${NEXUS_NPM_REPO}/"
           HOST_ONLY=$(echo "${NEXUS_REGISTRY}" | sed -E 's#https?://##; s#/$##')
-
-          # Quick reachability check (fail fast with readable message)
-          STATUS=$(curl -o /dev/null -s -w "%{http_code}" --max-time 10 "${NEXUS_REGISTRY}" || echo "000")
-          if [ "$STATUS" = "404" ]; then
-            echo "ERROR: Nexus registry returned 404 - repository may not exist or name is wrong: ${NEXUS_REGISTRY}"
-            echo "Please confirm repository '${NEXUS_NPM_REPO}' exists and is a hosted npm repo."
-            exit 1
-          fi
 
           # Use the Jenkins-provided credential variables NEXUS_CRED_USR / NEXUS_CRED_PSW
           # Create basic auth in base64 for .npmrc. We DO NOT print auth.
