@@ -104,7 +104,7 @@ pipeline {
           set -e
           echo "Uploading nodeapp.zip to Nexus..."
           curl -v -u $NEXUS_CRED_USR:$NEXUS_CRED_PSW \
-            --upload-file nodeapp.zip \
+            --upload-file newmew.zip \
             ${NEXUS_URL}/repository/nodejs/newmew.zip
         '''
       }
