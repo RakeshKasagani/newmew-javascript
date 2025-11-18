@@ -38,8 +38,7 @@ pipeline {
             nvm use 18
             echo "Installed Node: $(node -v)"
           fi
-          # Ensure nvm/node are available to subsequent steps in this shell; for declarative pipeline each sh runs in a fresh shell,
-          # so we write a wrapper file that other steps can source.
+          # Write wrapper so subsequent steps can source nvm/node
           echo 'export NVM_DIR="$HOME/.nvm"' > .nvmrc_for_jenkins
           echo '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> .nvmrc_for_jenkins
           echo 'nvm use 18 >/dev/null 2>&1 || true' >> .nvmrc_for_jenkins
@@ -90,10 +89,14 @@ pipeline {
 
     stage('Package Artifact') {
       steps {
+        // Use npm pack instead of zip to avoid missing zip binary on agent
         sh '''
           set -e
-          zip -r nodeapp.zip . -x "node_modules/*" ".git/*"
-          ls -lh nodeapp.zip
+          if [ -f .nvmrc_for_jenkins ]; then . ./.nvmrc_for_jenkins; fi
+          echo "Creating npm package tarball with npm pack..."
+          npm pack
+          echo "Pack created:"
+          ls -lh *.tgz || true
         '''
       }
     }
@@ -102,10 +105,15 @@ pipeline {
       steps {
         sh '''
           set -e
-          echo "Uploading nodeapp.zip to Nexus..."
+          TARBALL=$(ls *.tgz | head -n1)
+          if [ -z "$TARBALL" ]; then
+            echo "ERROR: no tarball found to upload"
+            exit 1
+          fi
+          echo "Uploading ${TARBALL} to Nexus..."
           curl -v -u $NEXUS_CRED_USR:$NEXUS_CRED_PSW \
-            --upload-file newmew.zip \
-            ${NEXUS_URL}/repository/nodejs/newmew.zip
+            --upload-file "${TARBALL}" \
+            ${NEXUS_URL}/repository/nodejs/${TARBALL}
         '''
       }
     }
