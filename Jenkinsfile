@@ -16,21 +16,8 @@ pipeline {
       steps { git branch: 'master', url: 'https://github.com/RakeshKasagani/newmew-javascript.git' }
     }
 
-    stage('Debug environment') {
-      steps {
-        sh '''
-          echo "USER: $(whoami) HOST: $(hostname)"
-          echo "Workspace: $WORKSPACE"
-          echo "PATH=$PATH"
-          which node || true
-          node -v || true
-          npm -v || true
-          which docker || echo "docker not found"
-        '''
-      }
-    }
 
-    stage('Install & Build (no-docker)') {
+    stage('Install & Build ') {
       steps {
         script {
           // 1) Prefer system node if present
