@@ -7,8 +7,8 @@ pipeline {
     NEXUS_CRED  = credentials('nexus')           // username/password -> NEXUS_CRED_USR / NEXUS_CRED_PSW
     DOCKER_HUB  = credentials('docker-hub')      // username/password -> DOCKER_HUB_USR / DOCKER_HUB_PSW
 
-    SONARQUBE_URL = 'http://13.51.204.28:9000'
-    NEXUS_URL     = 'http://13.51.204.28:8081'
+    SONARQUBE_URL = 'http://51.20.37.198:9000/'
+    NEXUS_URL     = 'http://51.20.37.198:8081/'
     DOCKER_IMAGE  = "rakesh268/newmew:latest"
     VERSION       = "${env.BUILD_NUMBER}"
   }
