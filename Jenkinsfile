@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         SONAR_TOKEN = credentials('sonar')
-        NEXUS_CRED  = credentials('nexus')
+        NEXUS_CRED  = credentials('nexus')           // used only if you want env style access
         DOCKER_HUB  = credentials('docker-hub')
     }
 
@@ -16,47 +16,78 @@ pipeline {
             }
         }
 
-        stage('Install Dependencies') {
+        stage('Debug environment') {
             steps {
                 sh '''
-                    echo "Node version:"
-                    node -v
-
-                    echo "NPM version:"
-                    npm -v
-
-                    echo "Installing Node dependencies..."
-                    npm install --no-audit --no-fund
+                    echo "Running on $(whoami) @ $(hostname)"
+                    echo "Workspace: $WORKSPACE"
+                    echo "PATH=$PATH"
+                    which node || true
+                    node -v 2>/dev/null || echo "node not on PATH"
                 '''
+            }
+        }
+
+        // Use the official Node image to guarantee node/npm are available
+        stage('Install & Build (inside node container)') {
+            steps {
+                script {
+                    docker.image('node:20').inside {
+                        sh '''
+                            echo "Node version:"
+                            node -v
+
+                            echo "NPM version:"
+                            npm -v
+
+                            echo "Installing Node dependencies (npm ci)..."
+                            npm ci --no-audit --no-fund
+
+                            echo "Run build (if defined)..."
+                            if [ -f package.json ]; then
+                              # prefer a build script if present
+                              if npm run | grep -q " build"; then
+                                npm run build || true
+                              fi
+                            fi
+                        '''
+                    }
+                }
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
+                // run sonar-scanner in a container so the agent doesn't need it installed
                 withSonarQubeEnv('My-Sonar') {
-                    sh '''
-                        /opt/sonar-scanner/bin/sonar-scanner \
-                          -Dsonar.projectKey=nodeapp \
-                          -Dsonar.sources=. \
-                          -Dsonar.host.url=http://51.20.37.198:9000/
-                          -Dsonar.login=$SONAR_TOKEN
-                    '''
+                    script {
+                        docker.image('sonarsource/sonar-scanner-cli:latest').inside('-u root') {
+                            sh """
+                                sonar-scanner \
+                                  -Dsonar.projectKey=nodeapp \
+                                  -Dsonar.sources=. \
+                                  -Dsonar.host.url=http://51.20.37.198:9000 \
+                                  -Dsonar.login=${SONAR_TOKEN}
+                            """
+                        }
+                    }
                 }
             }
         }
 
-        stage('Upload to nexus') {
+        stage('Create Artifact & Upload to Nexus') {
             steps {
                 withCredentials([usernamePassword(
-                    credentialsId: 'NEXUS-CRED',
+                    credentialsId: 'nexus',
                     usernameVariable: 'NEXUS_USER',
                     passwordVariable: 'NEXUS_PASS'
                 )]) {
-
                     sh '''
+                        echo "Listing files to be archived..."
+                        ls -la
+
                         echo "Creating TAR..."
-                        tar --ignore-failed-read --warning=no-file-changed \
-                            -czf newmew.tar.gz *
+                        tar --ignore-failed-read --warning=no-file-changed -czf newmew.tar.gz *
 
                         echo "Uploading TAR to nexus..."
                         curl -v -u $NEXUS_USER:$NEXUS_PASS \
@@ -70,7 +101,7 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 sh '''
-                    echo "Building Docker image..."
+                    echo "Building Docker image on agent..."
                     docker build -t rakesh268/newmew:latest .
                 '''
             }
@@ -83,19 +114,23 @@ pipeline {
                     usernameVariable: 'DOCKER_USER',
                     passwordVariable: 'DOCKER_PASS'
                 )]) {
-
                     sh '''
+                        echo "Logging into Docker Hub..."
                         echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+
+                        echo "Pushing image..."
                         docker push rakesh268/newmew:latest
                     '''
                 }
             }
         }
-    }   // ✅ THIS was missing (closing stages)
+    }   // end stages
 
     post {
         always {
             echo "Pipeline finished!"
+            // optional: clean workspace to free space on agent
+            cleanWs()
         }
     }
 }
