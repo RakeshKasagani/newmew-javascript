@@ -1,5 +1,5 @@
 pipeline {
-
+      agent none
     environment {
         SONAR_TOKEN = credentials('sonar')
         NEXUS_CRED = credentials('nexus')
