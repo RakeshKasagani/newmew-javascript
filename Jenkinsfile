@@ -9,6 +9,7 @@ pipeline {
 
     SONARQUBE_URL = 'http://51.20.37.198:9000/'
     NEXUS_URL     = 'http://51.20.37.198:8081/'
+    NEXUS_NPM_REPO = 'npm-hosted'                // <- change this if your Nexus npm repo has a different name
     DOCKER_IMAGE  = "rakesh268/newmew:latest"
     VERSION       = "${env.BUILD_NUMBER}"
   }
@@ -22,7 +23,6 @@ pipeline {
 
     stage('Ensure Node') {
       steps {
-        // Install nvm + node 18 if node not available. This is idempotent.
         sh '''
           set -e
           if command -v node >/dev/null 2>&1; then
@@ -50,12 +50,9 @@ pipeline {
 
     stage('Install Dependencies') {
       steps {
-        // Source the nvm wrapper so node/npm are available in this shell
         sh '''
           set -e
-          if [ -f .nvmrc_for_jenkins ]; then
-            . ./.nvmrc_for_jenkins
-          fi
+          if [ -f .nvmrc_for_jenkins ]; then . ./.nvmrc_for_jenkins; fi
           echo "Node: $(node -v || true)"
           echo "NPM:  $(npm -v || true)"
           echo "Installing dependencies..."
@@ -64,14 +61,54 @@ pipeline {
       }
     }
 
-    stage('SonarQube Analysis') {
+    stage('Prepare package.json & npmignore') {
       steps {
-        // Use the sonar-scanner npm package via npx so you don't need system sonar-scanner.
+        // Remove private field and bump version if it's 0.0.0; create .npmignore to exclude large assets
         sh '''
           set -e
           if [ -f .nvmrc_for_jenkins ]; then . ./.nvmrc_for_jenkins; fi
 
-          # install sonar-scanner locally if not present (will be cached in workspace)
+          if [ -f package.json ]; then
+            echo "Original package.json:"
+            jq '.' package.json || cat package.json
+
+            # Remove "private" if present
+            node -e "let fs=require('fs'); let p=JSON.parse(fs.readFileSync('package.json')); if(p.private){ delete p.private; console.log('Removed private flag'); } if(p.version === '0.0.0' || !p.version){ p.version = '0.0.' + (process.env.BUILD_NUMBER || Date.now()); console.log('Bumped version to', p.version);} fs.writeFileSync('package.json', JSON.stringify(p,null,2));"
+
+            echo "Updated package.json:"
+            jq '.' package.json || cat package.json
+          else
+            echo "No package.json found!"
+            exit 1
+          fi
+
+          # Create a conservative .npmignore to avoid publishing large assets
+          cat > .npmignore <<'EOF'
+# exclude large assets and CI files from published package
+src/assets/*.png
+src/assets/*.jpg
+src/assets/*.jpeg
+src/assets/*.otf
+src/assets/*.ttf
+public/
+.scannerwork/
+Dockerfile
+Jenkinsfile
+.git
+node_modules/
+EOF
+
+          echo ".npmignore created (will reduce package size)."
+        '''
+      }
+    }
+
+    stage('SonarQube Analysis') {
+      steps {
+        sh '''
+          set -e
+          if [ -f .nvmrc_for_jenkins ]; then . ./.nvmrc_for_jenkins; fi
+
           if ! npx --no-install sonar-scanner --version >/dev/null 2>&1; then
             echo "Installing sonar-scanner npm package..."
             npm install --no-audit --no-fund sonar-scanner
@@ -89,7 +126,6 @@ pipeline {
 
     stage('Package Artifact') {
       steps {
-        // Use npm pack instead of zip to avoid missing zip binary on agent
         sh '''
           set -e
           if [ -f .nvmrc_for_jenkins ]; then . ./.nvmrc_for_jenkins; fi
@@ -97,6 +133,26 @@ pipeline {
           npm pack
           echo "Pack created:"
           ls -lh *.tgz || true
+        '''
+      }
+    }
+
+    stage('Verify Nexus & Debug') {
+      steps {
+        // Lightweight check so we get clearer logs if the repo name is wrong or unreachable
+        sh '''
+          set -e
+          if [ -f .nvmrc_for_jenkins ]; then . ./.nvmrc_for_jenkins; fi
+
+          NEXUS_REGISTRY="${NEXUS_URL%/}/repository/${NEXUS_NPM_REPO}/"
+          echo "Checking Nexus registry URL: ${NEXUS_REGISTRY}"
+          echo "curl -I output:"
+          curl -I --max-time 10 "${NEXUS_REGISTRY}" || true
+
+          echo "Showing the top of the generated .npmignore (for verification):"
+          sed -n '1,120p' .npmignore || true
+
+          echo "If the previous curl returned 404, confirm Nexus repo name and that it's a 'hosted' npm repo (not proxy/group)."
         '''
       }
     }
@@ -115,15 +171,23 @@ pipeline {
           fi
           echo "Publishing ${TARBALL} to Nexus npm repository..."
 
-          # Adjust repo id if your Nexus npm repo is named differently (replace npm-hosted)
-          NEXUS_REGISTRY="${NEXUS_URL%/}/repository/npm-hosted/"
-
-          # Build host-only used for .npmrc auth lines
+          # Build registry URL and host-only (used to create .npmrc)
+          NEXUS_REGISTRY="${NEXUS_URL%/}/repository/${NEXUS_NPM_REPO}/"
           HOST_ONLY=$(echo "${NEXUS_REGISTRY}" | sed -E 's#https?://##; s#/$##')
 
-          # Create base64 auth (works on most agents). Fallback tries openssl if base64 options differ.
+          # Quick reachability check (fail fast with readable message)
+          STATUS=$(curl -o /dev/null -s -w "%{http_code}" --max-time 10 "${NEXUS_REGISTRY}" || echo "000")
+          if [ "$STATUS" = "404" ]; then
+            echo "ERROR: Nexus registry returned 404 - repository may not exist or name is wrong: ${NEXUS_REGISTRY}"
+            echo "Please confirm repository '${NEXUS_NPM_REPO}' exists and is a hosted npm repo."
+            exit 1
+          fi
+
+          # Use the Jenkins-provided credential variables NEXUS_CRED_USR / NEXUS_CRED_PSW
+          # Create basic auth in base64 for .npmrc. We DO NOT print auth.
           AUTH_B64=$(printf '%s' "${NEXUS_CRED_USR}:${NEXUS_CRED_PSW}" | base64 --wrap=0 2>/dev/null || printf '%s' "${NEXUS_CRED_USR}:${NEXUS_CRED_PSW}" | openssl base64 -A)
 
+          # Create a temporary .npmrc_for_publish (deleted after publish). Don't echo secret contents.
           cat > .npmrc_for_publish <<EOF
 registry=${NEXUS_REGISTRY}
 //${HOST_ONLY}/:_auth=${AUTH_B64}
@@ -132,7 +196,7 @@ EOF
 
           export npm_config_userconfig=$(pwd)/.npmrc_for_publish
 
-          # publish the tarball
+          # Attempt publish. If registry rejects, npm will provide useful error in console.
           npm publish "$TARBALL" --registry "${NEXUS_REGISTRY}" --tag latest
 
           # cleanup
@@ -144,7 +208,6 @@ EOF
 
     stage('Build Docker Image') {
       steps {
-        // guard: only attempt docker build if docker client can connect to the daemon
         sh '''
           set -e
           if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
@@ -160,7 +223,6 @@ EOF
 
     stage('Push Docker Image') {
       steps {
-        // guard: only attempt docker push if docker is available
         sh '''
           set -e
           if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
