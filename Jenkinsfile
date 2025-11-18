@@ -1,93 +1,80 @@
+pipeline {
     agent any
 
-    tools {
-        nodejs 'NodeJS-20'
-    }
-
     environment {
-        DOCKER_IMAGE = "rakesh268/newmew"
-        VERSION = "${env.BUILD_NUMBER}"
+        SONAR_TOKEN = credentials('sonar')
+        NEXUS_CRED = credentials('nexus')
+        DOCKER_HUB = credentials('docker-hub')
     }
 
     stages {
 
         stage('Checkout') {
             steps {
-                echo "Checking out code..."
-                checkout scm
+                git branch: 'main', url: 'https://github.com/KishanGollamudi/nodejs-getting-started.git'
             }
         }
 
         stage('Install Dependencies') {
             steps {
-                echo "Running npm install..."
-                sh "npm install"
-            }
-        }
+                sh '''
+                    echo "Node version:"
+                    node -v
 
-        stage('Run Tests') {
-            steps {
-                echo "Skipping tests..."
-                sh 'echo "Tests skipped"'
+                    echo "NPM version:"
+                    npm -v
+
+                    echo Installing Node dependencies...
+                    npm install --no-audit --no-fund
+                '''
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
-                echo "Running SonarQube analysis..."
-
-                script {
-                    // Load Sonar Scanner Tool
-                    def scannerHome = tool 'SonarScanner'
-
-                    withCredentials([string(credentialsId: 'sonar', variable: 'SONAR_TOKEN')]) {
-                        withSonarQubeEnv('My-Sonar') {
-                            sh """
-                                ${scannerHome}/bin/sonar-scanner \
-                                  -Dsonar.projectKey=newmew \
-                                  -Dsonar.sources=. \
-                                  -Dsonar.host.url=$SONAR_HOST_URL \
-                                  -Dsonar.login=$SONAR_TOKEN
-                            """
-                        }
-                    }
+                withSonarQubeEnv('My-Sonar') {
+                    sh '''
+                        /opt/sonar-scanner/bin/sonar-scanner \
+                          -Dsonar.projectKey=newmew \
+                          -Dsonar.sources=. \
+                          -Dsonar.host.url=http://13.51.204.28:9000/
+                          -Dsonar.login=$SONAR_TOKEN
+                    '''
                 }
+            }
+        }
+
+        stage('Upload to nexus') {
+            steps {
+                sh '''
+                    curl -v -u $NEXUS_CRED_USR:$NEXUS_CRED_PSW \
+                        --upload-file nodeapp.zip \
+                        http://13.51.204.28:8081/repository/nodejs/newmew.zip
+                '''
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                echo "Building Docker image..."
-                script {
-                    docker.build("${DOCKER_IMAGE}:${VERSION}")
-                }
+                sh '''
+                    docker build -t rakesh268/newmew:latest .
+                '''
             }
         }
 
-        stage('Push to DockerHub') {
+        stage('Push Docker Image') {
             steps {
-                echo "Pushing image to DockerHub..."
-
-                withCredentials([usernamePassword(
-                    credentialsId: 'docker-hub',
-                    usernameVariable: 'DH_USER',
-                    passwordVariable: 'DH_PASS'
-                )]) {
-                    sh """
-                        echo $DH_PASS | docker login -u $DH_USER --password-stdin
-                        docker push ${DOCKER_IMAGE}:${VERSION}
-                        docker tag ${DOCKER_IMAGE}:${VERSION} ${DOCKER_IMAGE}:latest
-                        docker push ${DOCKER_IMAGE}:latest
-                    """
-                }
+                sh '''
+                    echo $DOCKER_HUB_PSW | docker login -u $DOCKER_HUB_USR --password-stdin
+                    docker push rakesh268/newmew:latest
+                '''
             }
         }
     }
 
     post {
         always {
-            echo "Cleaning workspace..."
-            cleanWs()
+            echo "Pipeline finished!"
         }
     }
 }
