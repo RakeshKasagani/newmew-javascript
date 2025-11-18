@@ -86,7 +86,7 @@ pipeline {
       }
     }
 
-    stage('Build Docker Image (optional)') {
+    stage('Build Docker Image') {
       when {
         expression {
           // only run if docker command exists on agent
@@ -101,7 +101,7 @@ pipeline {
       }
     }
 
-    stage('Push Docker Image (optional)') {
+    stage('Push Docker Image') {
       when {
         expression {
           return sh(script: 'which docker >/dev/null 2>&1 && echo yes || echo no', returnStdout: true).trim() == 'yes'
