@@ -101,41 +101,77 @@ pipeline {
       }
     }
 
-    stage('Upload to Nexus') {
+    stage('Publish to Nexus (npm)') {
       steps {
+        // Publish the npm tarball to Nexus npm repository using npm publish (correct method for npm repos)
         sh '''
           set -e
+          if [ -f .nvmrc_for_jenkins ]; then . ./.nvmrc_for_jenkins; fi
+
           TARBALL=$(ls *.tgz | head -n1)
           if [ -z "$TARBALL" ]; then
-            echo "ERROR: no tarball found to upload"
+            echo "ERROR: no tarball found to publish"
             exit 1
           fi
-          echo "Uploading ${TARBALL} to Nexus..."
-          curl -v -u $NEXUS_CRED_USR:$NEXUS_CRED_PSW \
-            --upload-file "${TARBALL}" \
-            ${NEXUS_URL}/repository/nodejs/${TARBALL}
+          echo "Publishing ${TARBALL} to Nexus npm repository..."
+
+          # Adjust repo id if your Nexus npm repo is named differently (replace npm-hosted)
+          NEXUS_REGISTRY="${NEXUS_URL%/}/repository/npm-hosted/"
+
+          # Build host-only used for .npmrc auth lines
+          HOST_ONLY=$(echo "${NEXUS_REGISTRY}" | sed -E 's#https?://##; s#/$##')
+
+          # Create base64 auth (works on most agents). Fallback tries openssl if base64 options differ.
+          AUTH_B64=$(printf '%s' "${NEXUS_CRED_USR}:${NEXUS_CRED_PSW}" | base64 --wrap=0 2>/dev/null || printf '%s' "${NEXUS_CRED_USR}:${NEXUS_CRED_PSW}" | openssl base64 -A)
+
+          cat > .npmrc_for_publish <<EOF
+registry=${NEXUS_REGISTRY}
+//${HOST_ONLY}/:_auth=${AUTH_B64}
+//${HOST_ONLY}/:always-auth=true
+EOF
+
+          export npm_config_userconfig=$(pwd)/.npmrc_for_publish
+
+          # publish the tarball
+          npm publish "$TARBALL" --registry "${NEXUS_REGISTRY}" --tag latest
+
+          # cleanup
+          rm -f .npmrc_for_publish
+          echo "Publish completed."
         '''
       }
     }
 
     stage('Build Docker Image') {
       steps {
+        // guard: only attempt docker build if docker client can connect to the daemon
         sh '''
           set -e
-          echo "Building Docker image ${DOCKER_IMAGE}..."
-          docker build -t ${DOCKER_IMAGE} .
+          if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            echo "Docker is available — building image ${DOCKER_IMAGE}..."
+            docker build -t ${DOCKER_IMAGE} .
+          else
+            echo "Docker not available on this agent or cannot access daemon — skipping Docker build."
+            exit 0
+          fi
         '''
       }
     }
 
     stage('Push Docker Image') {
       steps {
+        // guard: only attempt docker push if docker is available
         sh '''
           set -e
-          echo "Logging into Docker Hub..."
-          echo $DOCKER_HUB_PSW | docker login -u $DOCKER_HUB_USR --password-stdin
-          echo "Pushing ${DOCKER_IMAGE}..."
-          docker push ${DOCKER_IMAGE}
+          if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            echo "Logging into Docker Hub..."
+            echo $DOCKER_HUB_PSW | docker login -u $DOCKER_HUB_USR --password-stdin
+            echo "Pushing ${DOCKER_IMAGE}..."
+            docker push ${DOCKER_IMAGE}
+          else
+            echo "Docker not available or daemon not accessible — skipping Docker push."
+            exit 0
+          fi
         '''
       }
     }
