@@ -1,11 +1,6 @@
 pipeline {
   agent any
-
-  // Ensure you add a Node installation named "Node_20" (or change name below)
-  tools {
-    nodejs 'Node_20'
-  }
-
+  
   environment {
     SONAR_TOKEN = credentials('sonar')
     NEXUS_CRED  = credentials('nexus')
